@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Neurolet Neural Trainer v2.11</title>
+  <title>Neurolet Neural Trainer v2.11.2</title>
   <style>
     :root {
       --bg: #03070c;
@@ -410,13 +410,54 @@
 
     .feedback-row[hidden] { display: none; }
 
+    .graph-wrap {
+      position: relative;
+      border-bottom: 1px solid rgba(114,241,255,.13);
+      background: rgba(0, 0, 0, 0.20);
+      overflow: hidden;
+    }
+
     #graphCanvas {
       width: 100%;
-      height: 240px;
+      height: 260px;
       display: block;
-      background: rgba(0, 0, 0, 0.20);
-      border-bottom: 1px solid rgba(114,241,255,.13);
-      cursor: crosshair;
+      cursor: grab;
+      touch-action: none;
+    }
+
+    #graphCanvas.dragging { cursor: grabbing; }
+
+    .graph-toolbar {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      max-width: calc(100% - 20px);
+      z-index: 3;
+    }
+
+    .graph-toolbar .btn {
+      padding: 6px 9px;
+      font-size: 11px;
+      background: rgba(3, 14, 24, .82);
+    }
+
+    .graph-help {
+      position: absolute;
+      left: 10px;
+      bottom: 10px;
+      max-width: calc(100% - 20px);
+      color: rgba(233,251,255,.78);
+      background: rgba(3, 14, 24, .68);
+      border: 1px solid rgba(114,241,255,.16);
+      border-radius: 999px;
+      padding: 5px 9px;
+      font-size: 10px;
+      pointer-events: none;
+      z-index: 2;
     }
 
     .tooltip {
@@ -627,7 +668,7 @@
   <div class="app" id="app">
     <aside class="panel side">
       <div class="panel-header">
-        <div class="title">Neurolet Core <span class="tiny">v2.11</span></div>
+        <div class="title">Neurolet Core <span class="tiny">v2.11.2</span></div>
         <div class="tiny" id="clock">--:--</div>
       </div>
       <div class="status-body">
@@ -702,7 +743,15 @@
         <div class="title">Connections</div>
         <div class="tiny" id="nodeCount">0 nodes</div>
       </div>
-      <canvas id="graphCanvas"></canvas>
+      <div class="graph-wrap">
+        <canvas id="graphCanvas"></canvas>
+        <div class="graph-toolbar" aria-label="Graph controls">
+          <button class="btn" id="graphZoomInBtn" title="Zoom in">+</button>
+          <button class="btn" id="graphZoomOutBtn" title="Zoom out">−</button>
+          <button class="btn" id="graphResetBtn" title="Reset graph view and node positions">Reset View</button>
+        </div>
+        <div class="graph-help">Drag empty space to pan • wheel to zoom • drag nodes to arrange • click to select</div>
+      </div>
       <div class="right-body">
         <div class="section-title">Stats</div>
         <div class="stat-line"><span>Connections</span><span id="connStat">0</span></div>
@@ -735,10 +784,20 @@
   <script>
     const STORAGE_KEY = 'neurolet-neural-trainer-v2';
     const CHANGELOG_SEEN_KEY = 'neurolet-changelog-seen-version';
-    const APP_VERSION = '2.11';
+    const APP_VERSION = '2.11.2';
     const LEGACY_STORAGE_KEY = 'nov' + 'i-neural-trainer-v1';
     const LEGACY_HATCHLING_STORAGE_KEY = 'hat' + 'chling-neural-trainer-v1';
     const CHANGELOG = [
+      {
+        version: '2.11.2',
+        date: 'May 15, 2026',
+        title: 'Interactive graph navigation',
+        items: [
+          'Added click-and-drag panning plus wheel and button zoom controls for moving around the Connections graph.',
+          'Nodes can now be dragged into better positions, with custom placements saved alongside the brain.',
+          'Graph hover and selection now work through zoomed or panned views, with stronger highlighting for selected neighborhoods.'
+        ]
+      },
       {
         version: '2.11',
         date: 'May 15, 2026',
@@ -887,6 +946,9 @@
       intentStat: document.getElementById('intentStat'),
       nodeCount: document.getElementById('nodeCount'),
       graph: document.getElementById('graphCanvas'),
+      graphZoomIn: document.getElementById('graphZoomInBtn'),
+      graphZoomOut: document.getElementById('graphZoomOutBtn'),
+      graphReset: document.getElementById('graphResetBtn'),
       tooltip: document.getElementById('tooltip'),
       askQuestion: document.getElementById('askQuestionBtn'),
       milestones: document.getElementById('milestones'),
@@ -924,6 +986,8 @@
     let nodes = [];
     let edges = [];
     let selectedNode = null;
+    let hoveredNode = null;
+    let graphDrag = null;
     let pulseWords = new Set();
     let animationTick = 0;
     let lastGraphSignature = '';
@@ -956,7 +1020,9 @@
           questionsAsked: 0
         },
         settings: {
-          staticGraph: true
+          staticGraph: true,
+          graphView: { x: 0, y: 0, scale: 1 },
+          graphNodePositions: {}
         }
       };
     }
@@ -1776,6 +1842,57 @@
       return (hash >>> 0) / 4294967295;
     }
 
+    function getGraphView() {
+      if (!brain.settings) brain.settings = createBrain().settings;
+      if (!brain.settings.graphView) brain.settings.graphView = { x: 0, y: 0, scale: 1 };
+      brain.settings.graphView.scale = clamp(Number(brain.settings.graphView.scale) || 1, 0.35, 3.2);
+      brain.settings.graphView.x = Number(brain.settings.graphView.x) || 0;
+      brain.settings.graphView.y = Number(brain.settings.graphView.y) || 0;
+      return brain.settings.graphView;
+    }
+
+    function getGraphNodePositions() {
+      if (!brain.settings) brain.settings = createBrain().settings;
+      if (!brain.settings.graphNodePositions) brain.settings.graphNodePositions = {};
+      return brain.settings.graphNodePositions;
+    }
+
+    function screenToGraphPoint(x, y) {
+      const view = getGraphView();
+      return { x: (x - view.x) / view.scale, y: (y - view.y) / view.scale };
+    }
+
+    function zoomGraph(factor, originX, originY) {
+      const view = getGraphView();
+      const before = screenToGraphPoint(originX, originY);
+      view.scale = clamp(view.scale * factor, 0.35, 3.2);
+      view.x = originX - before.x * view.scale;
+      view.y = originY - before.y * view.scale;
+      graphNeedsDraw = true;
+      drawGraph();
+    }
+
+    function resetGraphView(resetPins = false) {
+      const view = getGraphView();
+      view.x = 0;
+      view.y = 0;
+      view.scale = 1;
+      if (resetPins) brain.settings.graphNodePositions = {};
+      selectedNode = null;
+      hoveredNode = null;
+      buildGraphData(true);
+      drawGraph();
+      save();
+    }
+
+    function findGraphNode(screenX, screenY) {
+      const point = screenToGraphPoint(screenX, screenY);
+      for (const n of nodes) {
+        if (Math.hypot(n.x - point.x, n.y - point.y) <= n.size + 8 / getGraphView().scale) return n;
+      }
+      return null;
+    }
+
     function graphSignature(words, rect, staticGraph) {
       const connectionSignature = words.map(word => {
         const links = Object.entries(brain.connections[word] || {})
@@ -1811,10 +1928,13 @@
           : baseAngle + Math.sin(Date.now()/2400 + i) * 0.025;
         const radiusJitter = staticGraph ? (stableGraphValue(word, 29) - 0.5) * 10 : 0;
         const radius = Math.min(w, h) * (0.18 + (i % 5) * 0.055) + radiusJitter;
+        const savedPosition = getGraphNodePositions()[word];
+        const baseX = centerX + Math.cos(angle) * radius;
+        const baseY = centerY + Math.sin(angle) * radius;
         return {
           word,
-          x: centerX + Math.cos(angle) * radius,
-          y: centerY + Math.sin(angle) * radius,
+          x: savedPosition ? clamp(savedPosition.x * w, 8, w - 8) : baseX,
+          y: savedPosition ? clamp(savedPosition.y * h, 8, h - 8) : baseY,
           size: clamp(5 + brain.vocabulary[word].count * 0.7, 6, 17),
           pulse: pulseWords.has(word) ? 1 : 0
         };
@@ -1846,50 +1966,68 @@
         canvas.height = Math.floor(rect.height * dpr);
       }
       const ctx = canvas.getContext('2d');
+      const view = getGraphView();
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, rect.width, rect.height);
       ctx.fillStyle = 'rgba(0,0,0,0.16)';
       ctx.fillRect(0, 0, rect.width, rect.height);
 
+      ctx.save();
+      ctx.translate(view.x, view.y);
+      ctx.scale(view.scale, view.scale);
+
       edges.forEach(edge => {
-        const alpha = clamp(edge.weight / 18, 0.08, 0.82);
+        const selectedEdge = selectedNode && (edge.a.word === selectedNode || edge.b.word === selectedNode);
+        const alpha = selectedEdge ? clamp(edge.weight / 12, 0.32, 0.95) : clamp(edge.weight / 18, 0.06, 0.72);
         ctx.beginPath();
         ctx.moveTo(edge.a.x, edge.a.y);
         ctx.lineTo(edge.b.x, edge.b.y);
-        ctx.strokeStyle = `rgba(114, 241, 255, ${alpha})`;
-        ctx.lineWidth = clamp(edge.weight / 4, 0.7, 5);
-        ctx.shadowColor = 'rgba(0,216,255,.28)';
-        ctx.shadowBlur = 3;
+        ctx.strokeStyle = selectedEdge ? `rgba(165, 139, 255, ${alpha})` : `rgba(114, 241, 255, ${alpha})`;
+        ctx.lineWidth = clamp(edge.weight / 4, 0.7, selectedEdge ? 6 : 5) / Math.sqrt(view.scale);
+        ctx.shadowColor = selectedEdge ? 'rgba(165,139,255,.42)' : 'rgba(0,216,255,.28)';
+        ctx.shadowBlur = selectedEdge ? 7 : 3;
         ctx.stroke();
       });
 
       nodes.forEach(node => {
+        const isSelected = selectedNode === node.word;
+        const isHovered = hoveredNode === node.word;
+        const isNeighbor = selectedNode && brain.connections[selectedNode]?.[node.word] > 0.4;
         const pulse = !brain.settings?.staticGraph && pulseWords.has(node.word) ? Math.sin(animationTick / 8) * 4 + 6 : 0;
         ctx.beginPath();
-        ctx.arc(node.x, node.y, node.size + pulse, 0, Math.PI * 2);
-        ctx.fillStyle = selectedNode === node.word ? 'rgba(165,139,255,.95)' : 'rgba(114,241,255,.88)';
-        ctx.shadowColor = selectedNode === node.word ? 'rgba(165,139,255,.7)' : 'rgba(0,216,255,.55)';
-        ctx.shadowBlur = 8 + pulse;
+        ctx.arc(node.x, node.y, node.size + pulse + (isHovered ? 2 : 0), 0, Math.PI * 2);
+        ctx.fillStyle = isSelected ? 'rgba(165,139,255,.96)' : isNeighbor ? 'rgba(141,255,186,.90)' : 'rgba(114,241,255,.88)';
+        ctx.shadowColor = isSelected ? 'rgba(165,139,255,.78)' : isNeighbor ? 'rgba(141,255,186,.52)' : 'rgba(0,216,255,.55)';
+        ctx.shadowBlur = (isSelected || isHovered ? 13 : 8) + pulse;
         ctx.fill();
+        if (isSelected || isHovered) {
+          ctx.lineWidth = 1.5 / view.scale;
+          ctx.strokeStyle = 'rgba(255,255,255,.82)';
+          ctx.stroke();
+        }
         ctx.shadowBlur = 0;
-        ctx.font = '11px ui-monospace, monospace';
+        ctx.font = `${clamp(11 / Math.sqrt(view.scale), 8, 13)}px ui-monospace, monospace`;
         ctx.fillStyle = '#e9fbff';
         ctx.textAlign = 'center';
         ctx.fillText(node.word, node.x, node.y - node.size - 8);
       });
+      ctx.restore();
+
+      ctx.fillStyle = 'rgba(114,241,255,.72)';
+      ctx.font = '10px ui-monospace, monospace';
+      ctx.textAlign = 'left';
+      ctx.fillText(`zoom ${Math.round(view.scale * 100)}%`, 10, 18);
       graphNeedsDraw = false;
     }
 
     function graphMouse(e, click = false) {
       const rect = el.graph.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      const y = e.clientY - rect.top;
-      let found = null;
-      for (const n of nodes) {
-        if (Math.hypot(n.x - x, n.y - y) <= n.size + 8) { found = n; break; }
-      }
+      const screenX = e.clientX - rect.left;
+      const screenY = e.clientY - rect.top;
+      const found = findGraphNode(screenX, screenY);
+      hoveredNode = found?.word || null;
       if (found) {
-        const links = getStrongConnections(found.word, 8).map(([w, val]) => `${w}: ${val.toFixed(1)}`).join('<br>') || 'No strong links yet.';
+        const links = getStrongConnections(found.word, 8).map(([w, val]) => `${escapeHTML(w)}: ${val.toFixed(1)}`).join('<br>') || 'No strong links yet.';
         el.tooltip.style.display = 'block';
         el.tooltip.style.left = `${e.clientX + 14}px`;
         el.tooltip.style.top = `${e.clientY + 14}px`;
@@ -1901,6 +2039,79 @@
       }
       graphNeedsDraw = true;
       drawGraph();
+    }
+
+    function graphPointerDown(e) {
+      if (e.button !== undefined && e.button !== 0) return;
+      const rect = el.graph.getBoundingClientRect();
+      const screenX = e.clientX - rect.left;
+      const screenY = e.clientY - rect.top;
+      const node = findGraphNode(screenX, screenY);
+      graphDrag = {
+        mode: node ? 'node' : 'pan',
+        word: node?.word || null,
+        startClientX: e.clientX,
+        startClientY: e.clientY,
+        startView: Object.assign({}, getGraphView()),
+        moved: false
+      };
+      el.graph.classList.add('dragging');
+      el.graph.setPointerCapture?.(e.pointerId);
+      e.preventDefault();
+    }
+
+    function graphPointerMove(e) {
+      if (!graphDrag) {
+        graphMouse(e, false);
+        return;
+      }
+      const rect = el.graph.getBoundingClientRect();
+      const dx = e.clientX - graphDrag.startClientX;
+      const dy = e.clientY - graphDrag.startClientY;
+      if (Math.hypot(dx, dy) > 3) graphDrag.moved = true;
+      if (graphDrag.mode === 'pan') {
+        const view = getGraphView();
+        view.x = graphDrag.startView.x + dx;
+        view.y = graphDrag.startView.y + dy;
+      } else if (graphDrag.word) {
+        const node = nodes.find(n => n.word === graphDrag.word);
+        if (node) {
+          selectedNode = node.word;
+          const point = screenToGraphPoint(e.clientX - rect.left, e.clientY - rect.top);
+          node.x = clamp(point.x, 8, rect.width - 8);
+          node.y = clamp(point.y, 8, rect.height - 8);
+          const positions = getGraphNodePositions();
+          positions[node.word] = {
+            x: clamp(node.x / Math.max(1, rect.width), 0, 1),
+            y: clamp(node.y / Math.max(1, rect.height), 0, 1)
+          };
+        }
+      }
+      graphNeedsDraw = true;
+      drawGraph();
+      e.preventDefault();
+    }
+
+    function graphPointerUp(e) {
+      if (!graphDrag) return;
+      const wasNodeClick = graphDrag.mode === 'node' && !graphDrag.moved;
+      const wasPanClick = graphDrag.mode === 'pan' && !graphDrag.moved;
+      const dragMode = graphDrag.mode;
+      const wasMoved = graphDrag.moved;
+      graphDrag = null;
+      el.graph.classList.remove('dragging');
+      el.graph.releasePointerCapture?.(e.pointerId);
+      if (wasNodeClick || wasPanClick) graphMouse(e, true);
+      if (wasMoved || dragMode === 'node') save();
+      graphNeedsDraw = true;
+      drawGraph();
+    }
+
+    function graphWheel(e) {
+      const rect = el.graph.getBoundingClientRect();
+      const factor = e.deltaY < 0 ? 1.12 : 0.88;
+      zoomGraph(factor, e.clientX - rect.left, e.clientY - rect.top);
+      e.preventDefault();
     }
 
     function quickTrain(kind) {
@@ -1992,9 +2203,15 @@
           sendPrompt(el.input.value);
         }
       });
-      el.graph.addEventListener('mousemove', e => graphMouse(e, false));
-      el.graph.addEventListener('mouseleave', () => { el.tooltip.style.display = 'none'; });
-      el.graph.addEventListener('click', e => graphMouse(e, true));
+      el.graph.addEventListener('pointerdown', graphPointerDown);
+      el.graph.addEventListener('pointermove', graphPointerMove);
+      el.graph.addEventListener('pointerup', graphPointerUp);
+      el.graph.addEventListener('pointercancel', graphPointerUp);
+      el.graph.addEventListener('mouseleave', () => { if (!graphDrag) { hoveredNode = null; el.tooltip.style.display = 'none'; drawGraph(); } });
+      el.graph.addEventListener('wheel', graphWheel, { passive: false });
+      el.graphZoomIn.onclick = () => zoomGraph(1.18, el.graph.clientWidth / 2, el.graph.clientHeight / 2);
+      el.graphZoomOut.onclick = () => zoomGraph(0.84, el.graph.clientWidth / 2, el.graph.clientHeight / 2);
+      el.graphReset.onclick = () => resetGraphView(true);
       window.addEventListener('resize', () => { buildGraphData(true); drawGraph(); });
     }
 
