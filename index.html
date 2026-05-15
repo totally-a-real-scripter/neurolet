@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Neurolet Neural Trainer v2.6</title>
+  <title>Neurolet Neural Trainer v2.9</title>
   <style>
     :root {
       --bg: #03070c;
@@ -627,7 +627,7 @@
   <div class="app" id="app">
     <aside class="panel side">
       <div class="panel-header">
-        <div class="title">Neurolet Core <span class="tiny">v2.8</span></div>
+        <div class="title">Neurolet Core <span class="tiny">v2.9</span></div>
         <div class="tiny" id="clock">--:--</div>
       </div>
       <div class="status-body">
@@ -735,10 +735,20 @@
   <script>
     const STORAGE_KEY = 'neurolet-neural-trainer-v2';
     const CHANGELOG_SEEN_KEY = 'neurolet-changelog-seen-version';
-    const APP_VERSION = '2.8.0';
+    const APP_VERSION = '2.9.0';
     const LEGACY_STORAGE_KEY = 'nov' + 'i-neural-trainer-v1';
     const LEGACY_HATCHLING_STORAGE_KEY = 'hat' + 'chling-neural-trainer-v1';
     const CHANGELOG = [
+      {
+        version: '2.9.0',
+        date: 'May 15, 2026',
+        title: 'Quiet replies and graph controls',
+        items: [
+          'Neurolet no longer automatically asks a knowledge question after every third player message.',
+          'Knowledge questions now only start from the Q/A button, so replies do not unexpectedly turn into a question prompt.',
+          'Added a Settings toggle that can lock the Connections graph into stable static positions.'
+        ]
+      },
       {
         version: '2.8.0',
         date: 'May 14, 2026',
@@ -921,6 +931,9 @@
           punishments: 0,
           generated: 0,
           questionsAsked: 0
+        },
+        settings: {
+          staticGraph: false
         }
       };
     }
@@ -1337,9 +1350,6 @@
       save();
       refresh();
       setTimeout(() => { el.feedbackRow.hidden = false; }, 180);
-      if (!fromChip && !answeredQuestion && !brain.awaitingQuestion && brain.stats.messages > 1 && brain.stats.messages % 3 === 0) {
-        setTimeout(() => askKnowledgeQuestion(false), 900);
-      }
     }
 
     function addMessage(type, text) {
@@ -1505,6 +1515,7 @@
           const parsed = JSON.parse(raw);
           brain = Object.assign(createBrain(), parsed);
           brain.stats = Object.assign(createBrain().stats, parsed.stats || {});
+          brain.settings = Object.assign(createBrain().settings, parsed.settings || {});
           if (!brain.definitions) brain.definitions = {};
           if (!('awaitingQuestion' in brain)) brain.awaitingQuestion = null;
           migrateOldNeuroletNames();
@@ -1640,6 +1651,13 @@
             </div>
           </div>
           <div class="settings-card">
+            <div class="section-title">Connections Graph</div>
+            <div class="tiny">Static mode keeps nodes in stable positions instead of drifting each refresh.</div>
+            <div class="setting-actions">
+              <button class="btn ${brain.settings?.staticGraph ? 'good' : ''}" id="staticGraphBtn">${brain.settings?.staticGraph ? 'Static Graph: On' : 'Static Graph: Off'}</button>
+            </div>
+          </div>
+          <div class="settings-card">
             <div class="section-title">Neurolet Identity</div>
             <div class="tiny">Current name: ${escapeHTML(brain.name || 'Neurolet-01')}</div>
           </div>
@@ -1652,10 +1670,20 @@
       setTimeout(() => {
         const openBtn = document.getElementById('openChangelogBtn');
         const nextBtn = document.getElementById('showChangelogNextBtn');
+        const staticGraphBtn = document.getElementById('staticGraphBtn');
         if (openBtn) openBtn.onclick = () => showChangelog(false);
         if (nextBtn) nextBtn.onclick = () => {
           localStorage.removeItem(CHANGELOG_SEEN_KEY);
           nextBtn.textContent = 'Will show next load';
+        };
+        if (staticGraphBtn) staticGraphBtn.onclick = () => {
+          if (!brain.settings) brain.settings = createBrain().settings;
+          brain.settings.staticGraph = !brain.settings.staticGraph;
+          staticGraphBtn.textContent = brain.settings.staticGraph ? 'Static Graph: On' : 'Static Graph: Off';
+          staticGraphBtn.classList.toggle('good', brain.settings.staticGraph);
+          buildGraphData();
+          drawGraph();
+          save();
         };
       }, 0);
     }
@@ -1692,6 +1720,7 @@
             if (!parsed.vocabulary || !parsed.connections) throw new Error('Missing brain fields');
             brain = Object.assign(createBrain(), parsed);
             brain.stats = Object.assign(createBrain().stats, parsed.stats || {});
+            brain.settings = Object.assign(createBrain().settings, parsed.settings || {});
             save();
             el.modal.classList.remove('open');
             addMessage('system', 'Imported Neurolet brain successfully.');
@@ -1707,6 +1736,15 @@
       return String(str).replace(/[&<>'"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[ch]));
     }
 
+    function stableGraphValue(word, salt = 0) {
+      let hash = 2166136261 + salt;
+      for (let i = 0; i < word.length; i++) {
+        hash ^= word.charCodeAt(i);
+        hash = Math.imul(hash, 16777619);
+      }
+      return (hash >>> 0) / 4294967295;
+    }
+
     function buildGraphData() {
       const words = Object.keys(brain.vocabulary).sort((a,b) => brain.vocabulary[b].count - brain.vocabulary[a].count).slice(0, 34);
       const wordSet = new Set(words);
@@ -1716,9 +1754,14 @@
       const h = rect.height || 240;
       const centerX = w / 2;
       const centerY = h / 2;
+      const staticGraph = !!brain.settings?.staticGraph;
       nodes = words.map((word, i) => {
-        const angle = (i / Math.max(1, words.length)) * Math.PI * 2 + Math.sin(Date.now()/2000 + i) * 0.04;
-        const radius = Math.min(w, h) * (0.18 + (i % 5) * 0.055) + random(-5, 5);
+        const baseAngle = (i / Math.max(1, words.length)) * Math.PI * 2;
+        const angle = staticGraph
+          ? baseAngle + stableGraphValue(word, 17) * 0.34
+          : baseAngle + Math.sin(Date.now()/2000 + i) * 0.04;
+        const radiusJitter = staticGraph ? (stableGraphValue(word, 29) - 0.5) * 10 : random(-5, 5);
+        const radius = Math.min(w, h) * (0.18 + (i % 5) * 0.055) + radiusJitter;
         return {
           word,
           x: centerX + Math.cos(angle) * radius,
@@ -1771,7 +1814,7 @@
       });
 
       nodes.forEach(node => {
-        const pulse = pulseWords.has(node.word) ? Math.sin(animationTick / 8) * 4 + 6 : 0;
+        const pulse = !brain.settings?.staticGraph && pulseWords.has(node.word) ? Math.sin(animationTick / 8) * 4 + 6 : 0;
         ctx.beginPath();
         ctx.arc(node.x, node.y, node.size + pulse, 0, Math.PI * 2);
         ctx.fillStyle = selectedNode === node.word ? 'rgba(165,139,255,.95)' : 'rgba(114,241,255,.88)';
