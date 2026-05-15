@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Neurolet Neural Trainer v2.10.1</title>
+  <title>Neurolet Neural Trainer v2.11</title>
   <style>
     :root {
       --bg: #03070c;
@@ -627,7 +627,7 @@
   <div class="app" id="app">
     <aside class="panel side">
       <div class="panel-header">
-        <div class="title">Neurolet Core <span class="tiny">v2.10.1</span></div>
+        <div class="title">Neurolet Core <span class="tiny">v2.11</span></div>
         <div class="tiny" id="clock">--:--</div>
       </div>
       <div class="status-body">
@@ -735,10 +735,20 @@
   <script>
     const STORAGE_KEY = 'neurolet-neural-trainer-v2';
     const CHANGELOG_SEEN_KEY = 'neurolet-changelog-seen-version';
-    const APP_VERSION = '2.10.1';
+    const APP_VERSION = '2.11';
     const LEGACY_STORAGE_KEY = 'nov' + 'i-neural-trainer-v1';
     const LEGACY_HATCHLING_STORAGE_KEY = 'hat' + 'chling-neural-trainer-v1';
     const CHANGELOG = [
+      {
+        version: '2.11',
+        date: 'May 15, 2026',
+        title: 'Vocabulary-locked speech and faster graph',
+        items: [
+          'Neurolet now filters every AI utterance so it only says words already present in its learned vocabulary.',
+          'Knowledge questions now use learned words only, falling back to a single known focus word instead of adding unseen prompt words.',
+          'The Connections graph now defaults to static positions, draws fewer heavy elements, and skips unchanged rebuilds for smoother performance.'
+        ]
+      },
       {
         version: '2.10.1.1.0',
         date: 'May 15, 2026',
@@ -916,6 +926,9 @@
     let selectedNode = null;
     let pulseWords = new Set();
     let animationTick = 0;
+    let lastGraphSignature = '';
+    let graphNeedsDraw = true;
+    let lastGraphFrame = 0;
     let resetArmed = false;
     let resetArmTimer = null;
 
@@ -943,7 +956,7 @@
           questionsAsked: 0
         },
         settings: {
-          staticGraph: false
+          staticGraph: true
         }
       };
     }
@@ -1116,6 +1129,17 @@
       return pairs[pairs.length - 1][0];
     }
 
+    function hasLearnedWord(word) {
+      return !!brain.vocabulary?.[word];
+    }
+
+    function learnedOnlyText(text, fallbackWords = []) {
+      const allowed = tokenize(text).filter(hasLearnedWord);
+      const fallback = fallbackWords.filter(hasLearnedWord);
+      const words = allowed.length ? allowed : fallback;
+      return words.length ? words.join(' ') : '...';
+    }
+
     function generateResponse(promptText, promptTokens) {
       const intent = detectIntent(promptText, promptTokens);
       brain.lastIntent = intent;
@@ -1132,7 +1156,7 @@
         if (directKey) {
           const meaning = brain.definitions[directKey].meaning;
           const usedDef = tokenize(`${directKey} ${meaning}`);
-          return { text: `${directKey} means ${meaning}`, used: usedDef, intent };
+          return { text: learnedOnlyText(`${directKey} means ${meaning}`, usedDef), used: usedDef, intent };
         }
       }
       if (intent === 'say') {
@@ -1141,7 +1165,7 @@
         if (phraseTokens.length && confidence > 15) {
           used = phraseTokens.slice(0, 10);
           response = confidence > 55 ? phraseTokens.join(' ') : phraseTokens.slice(0, Math.max(1, Math.ceil(phraseTokens.length / 2))).join(' ');
-          return { text: decorateResponse(response, confidence, intent), used, intent };
+          return { text: learnedOnlyText(decorateResponse(response, confidence, intent), used), used, intent };
         }
       }
 
@@ -1183,13 +1207,12 @@
       }
 
       if (!used.length) {
-        used = ['...'];
-        response = sample(['...', 'word?', 'input...?', 'small sound', 'i do not know yet']);
+        response = '...';
       } else {
         response = used.join(' ');
       }
 
-      return { text: decorateResponse(response, confidence, intent), used, intent };
+      return { text: learnedOnlyText(decorateResponse(response, confidence, intent), used), used, intent };
     }
 
     function decorateResponse(text, confidence, intent) {
@@ -1301,7 +1324,7 @@
             ];
       }
 
-      return { text: sample(templates), focus: focus.word, kind: focus.kind, tier };
+      return { text: learnedOnlyText(sample(templates), [focus.word]), focus: focus.word, kind: focus.kind, tier };
     }
 
     function askKnowledgeQuestion(manual = false) {
@@ -1475,7 +1498,7 @@
       renderMemory();
       renderMilestones();
       buildGraphData();
-      drawGraph();
+      if (graphNeedsDraw) drawGraph();
     }
 
     function renderMemory() {
@@ -1753,22 +1776,40 @@
       return (hash >>> 0) / 4294967295;
     }
 
-    function buildGraphData() {
-      const words = Object.keys(brain.vocabulary).sort((a,b) => brain.vocabulary[b].count - brain.vocabulary[a].count).slice(0, 34);
+    function graphSignature(words, rect, staticGraph) {
+      const connectionSignature = words.map(word => {
+        const links = Object.entries(brain.connections[word] || {})
+          .filter(([linked, weight]) => words.includes(linked) && weight > 0.4)
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([linked, weight]) => `${linked}:${weight.toFixed(1)}`)
+          .join(',');
+        return `${word}:${brain.vocabulary[word]?.count || 0}:${links}`;
+      }).join('|');
+      return `${Math.round(rect.width)}x${Math.round(rect.height)}:${staticGraph}:${connectionSignature}`;
+    }
+
+    function buildGraphData(force = false) {
+      const words = Object.keys(brain.vocabulary).sort((a,b) => brain.vocabulary[b].count - brain.vocabulary[a].count).slice(0, 24);
       const wordSet = new Set(words);
       const canvas = el.graph;
       const rect = canvas.getBoundingClientRect();
+      const staticGraph = brain.settings?.staticGraph !== false;
+      const signature = graphSignature(words, rect, staticGraph);
+      if (!force && staticGraph && signature === lastGraphSignature) {
+        el.nodeCount.textContent = `${nodes.length} nodes`;
+        return;
+      }
+      lastGraphSignature = signature;
       const w = rect.width || 300;
       const h = rect.height || 240;
       const centerX = w / 2;
       const centerY = h / 2;
-      const staticGraph = !!brain.settings?.staticGraph;
       nodes = words.map((word, i) => {
         const baseAngle = (i / Math.max(1, words.length)) * Math.PI * 2;
         const angle = staticGraph
           ? baseAngle + stableGraphValue(word, 17) * 0.34
-          : baseAngle + Math.sin(Date.now()/2000 + i) * 0.04;
-        const radiusJitter = staticGraph ? (stableGraphValue(word, 29) - 0.5) * 10 : random(-5, 5);
+          : baseAngle + Math.sin(Date.now()/2400 + i) * 0.025;
+        const radiusJitter = staticGraph ? (stableGraphValue(word, 29) - 0.5) * 10 : 0;
         const radius = Math.min(w, h) * (0.18 + (i % 5) * 0.055) + radiusJitter;
         return {
           word,
@@ -1790,9 +1831,10 @@
           edgeList.push({ a: pos[a], b: pos[b], weight });
         });
       });
-      edges = edgeList.sort((a,b) => b.weight - a.weight).slice(0, 70);
+      edges = edgeList.sort((a,b) => b.weight - a.weight).slice(0, 42);
       el.nodeCount.textContent = `${nodes.length} nodes`;
-      if (pulseWords.size) setTimeout(() => pulseWords.clear(), 650);
+      graphNeedsDraw = true;
+      if (pulseWords.size) setTimeout(() => { pulseWords.clear(); graphNeedsDraw = true; }, 650);
     }
 
     function drawGraph() {
@@ -1816,8 +1858,8 @@
         ctx.lineTo(edge.b.x, edge.b.y);
         ctx.strokeStyle = `rgba(114, 241, 255, ${alpha})`;
         ctx.lineWidth = clamp(edge.weight / 4, 0.7, 5);
-        ctx.shadowColor = 'rgba(0,216,255,.45)';
-        ctx.shadowBlur = 7;
+        ctx.shadowColor = 'rgba(0,216,255,.28)';
+        ctx.shadowBlur = 3;
         ctx.stroke();
       });
 
@@ -1826,8 +1868,8 @@
         ctx.beginPath();
         ctx.arc(node.x, node.y, node.size + pulse, 0, Math.PI * 2);
         ctx.fillStyle = selectedNode === node.word ? 'rgba(165,139,255,.95)' : 'rgba(114,241,255,.88)';
-        ctx.shadowColor = selectedNode === node.word ? 'rgba(165,139,255,.8)' : 'rgba(0,216,255,.75)';
-        ctx.shadowBlur = 14 + pulse;
+        ctx.shadowColor = selectedNode === node.word ? 'rgba(165,139,255,.7)' : 'rgba(0,216,255,.55)';
+        ctx.shadowBlur = 8 + pulse;
         ctx.fill();
         ctx.shadowBlur = 0;
         ctx.font = '11px ui-monospace, monospace';
@@ -1835,6 +1877,7 @@
         ctx.textAlign = 'center';
         ctx.fillText(node.word, node.x, node.y - node.size - 8);
       });
+      graphNeedsDraw = false;
     }
 
     function graphMouse(e, click = false) {
@@ -1856,6 +1899,7 @@
         el.tooltip.style.display = 'none';
         if (click) selectedNode = null;
       }
+      graphNeedsDraw = true;
       drawGraph();
     }
 
@@ -1951,12 +1995,12 @@
       el.graph.addEventListener('mousemove', e => graphMouse(e, false));
       el.graph.addEventListener('mouseleave', () => { el.tooltip.style.display = 'none'; });
       el.graph.addEventListener('click', e => graphMouse(e, true));
-      window.addEventListener('resize', () => { buildGraphData(); drawGraph(); });
+      window.addEventListener('resize', () => { buildGraphData(true); drawGraph(); });
     }
 
     function bootMessages() {
       addMessage('system', 'A Neurolet has just awakened. It knows almost nothing.');
-      addMessage('ai', '... word?');
+      addMessage('ai', '...');
     }
 
     function tick() {
@@ -1965,10 +2009,13 @@
       refresh();
     }
 
-    function animate() {
-      animationTick++;
-      drawGraph();
+    function animate(timestamp = 0) {
       requestAnimationFrame(animate);
+      if (timestamp - lastGraphFrame < 80) return;
+      lastGraphFrame = timestamp;
+      animationTick++;
+      if (brain.settings?.staticGraph === false) buildGraphData(true);
+      if (graphNeedsDraw || pulseWords.size || brain.settings?.staticGraph === false) drawGraph();
     }
 
     load();
