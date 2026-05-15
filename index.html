@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Neurolet Neural Trainer v2.9</title>
+  <title>Neurolet Neural Trainer v2.10</title>
   <style>
     :root {
       --bg: #03070c;
@@ -627,7 +627,7 @@
   <div class="app" id="app">
     <aside class="panel side">
       <div class="panel-header">
-        <div class="title">Neurolet Core <span class="tiny">v2.9</span></div>
+        <div class="title">Neurolet Core <span class="tiny">v2.10</span></div>
         <div class="tiny" id="clock">--:--</div>
       </div>
       <div class="status-body">
@@ -735,10 +735,20 @@
   <script>
     const STORAGE_KEY = 'neurolet-neural-trainer-v2';
     const CHANGELOG_SEEN_KEY = 'neurolet-changelog-seen-version';
-    const APP_VERSION = '2.9.0';
+    const APP_VERSION = '2.10.0';
     const LEGACY_STORAGE_KEY = 'nov' + 'i-neural-trainer-v1';
     const LEGACY_HATCHLING_STORAGE_KEY = 'hat' + 'chling-neural-trainer-v1';
     const CHANGELOG = [
+      {
+        version: '2.10.0',
+        date: 'May 15, 2026',
+        title: 'Silent knowledge questions',
+        items: [
+          'Removed the system explanation that appeared after Neurolet asked a knowledge question.',
+          'Removed the system confirmation after a question answer is absorbed, so question mode stays fully in-character.',
+          'Updated the app version and changelog so this no-hints fix appears as a new update.'
+        ]
+      },
       {
         version: '2.9.0',
         date: 'May 15, 2026',
@@ -1303,7 +1313,6 @@
       brain.lastIntent = 'knowledge-question';
       remember(`Asked about: ${q.focus}`);
       typeAIMessage(q.text);
-      addMessage('system', `${brain.name} is asking at its current speech level (${q.tier}). Your next message will teach it about “${q.focus}”.`);
       el.feedbackRow.hidden = true;
       save();
       refresh();
@@ -1325,7 +1334,6 @@
       brain.confidence = clamp(brain.confidence + 3.2, 0, 100);
       brain.mood = 'learning';
       remember(`Question answered: ${pending.focus} ↔ ${cleanAnswer || 'new words'}`);
-      addMessage('system', `${brain.name} remembered “${pending.focus}”.`);
       brain.awaitingQuestion = null;
       return true;
     }
